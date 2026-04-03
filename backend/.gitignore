@@ -1,0 +1,20 @@
+# Secrets — NEVER commit these
+serviceAccountKey.json
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Uploads (user data)
+uploads/

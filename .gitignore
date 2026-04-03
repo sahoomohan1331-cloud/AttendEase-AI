@@ -1,0 +1,32 @@
+# Secrets — NEVER commit
+backend/serviceAccountKey.json
+backend/.env
+
+# Large AI model (pushed to HuggingFace instead)
+backend/models/
+
+__pycache__/
+*.py[cod]
+*.egg-info/
+venv/
+
+# Node
+node_modules/
+.expo/
+*.tsbuildinfo
+
+# IDE
+.vscode/
+.idea/
+.gemini/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Uploads
+backend/uploads/
+
+# Build
+dist/
+build/
