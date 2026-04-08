@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { View, Text, TouchableOpacity, ScrollView, Alert, ActivityIndicator } from 'react-native';
+import React, { useState, useEffect, useCallback } from 'react';
+import { View, Text, TouchableOpacity, ScrollView, Alert, ActivityIndicator, RefreshControl } from 'react-native';
 import { collection, query, where, getDocs, limit, orderBy } from 'firebase/firestore';
 import { db } from '../firebaseConfig';
 import { signOut } from 'firebase/auth';
@@ -11,11 +11,14 @@ interface HomeScreenProps {
   onNavigate: (screen: Screen) => void;
   userRole: 'teacher' | 'student' | 'super-admin' | null;
   regNumber: string;
+  appVersion: string;
 }
 
-const HomeScreen: React.FC<HomeScreenProps> = ({ onNavigate, userRole, regNumber }) => {
+const HomeScreen: React.FC<HomeScreenProps> = ({ onNavigate, userRole, regNumber, appVersion }) => {
   const [notifications, setNotifications] = useState<any[]>([]);
   const [notifLoading, setNotifLoading] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [networkError, setNetworkError] = useState(false);
   const isAdmin = userRole === 'teacher' || userRole === 'super-admin';
 
   useEffect(() => {
@@ -43,12 +46,20 @@ const HomeScreen: React.FC<HomeScreenProps> = ({ onNavigate, userRole, regNumber
       );
       
       setNotifications(sorted.slice(0, 5));
+      setNetworkError(false);
     } catch (err) {
       console.error('Error fetching notifications:', err);
+      setNetworkError(true);
     } finally {
       setNotifLoading(false);
     }
   };
+
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    await fetchNotifications();
+    setRefreshing(false);
+  }, []);
 
   const ActionCard = ({
     emoji, title, subtitle, onPress, accentColor
@@ -57,47 +68,70 @@ const HomeScreen: React.FC<HomeScreenProps> = ({ onNavigate, userRole, regNumber
     onPress: () => void; accentColor?: string;
   }) => (
     <TouchableOpacity
-      style={[globalStyles.card, {
-        marginBottom: 12, padding: 18,
+      style={{
+        marginBottom: 12, padding: 18, borderRadius: 20,
         flexDirection: 'row', alignItems: 'center',
-        borderColor: accentColor ? `${accentColor}33` : 'rgba(255,255,255,0.05)',
+        backgroundColor: 'rgba(255,255,255,0.04)',
+        borderColor: accentColor ? `${accentColor}30` : 'rgba(255,255,255,0.06)',
         borderWidth: 1,
-      }]}
+      }}
       onPress={onPress}
       activeOpacity={0.7}
     >
       <View style={{
-        width: 48, height: 48, borderRadius: 14,
+        width: 50, height: 50, borderRadius: 16,
         backgroundColor: accentColor ? `${accentColor}15` : 'rgba(255,255,255,0.06)',
         justifyContent: 'center', alignItems: 'center',
         marginRight: 14,
       }}>
-        <Text style={{ fontSize: 22 }}>{emoji}</Text>
+        <Text style={{ fontSize: 24 }}>{emoji}</Text>
       </View>
       <View style={{ flex: 1 }}>
         <Text style={{ color: colors.text, fontSize: 16, fontWeight: '700' }}>{title}</Text>
-        <Text style={{ color: colors.textMuted, fontSize: 12, marginTop: 2 }}>{subtitle}</Text>
+        <Text style={{ color: colors.textMuted, fontSize: 12, marginTop: 3, lineHeight: 17 }}>{subtitle}</Text>
       </View>
-      <Text style={{ color: colors.textMuted, fontSize: 16 }}>›</Text>
+      <View style={{ 
+        width: 28, height: 28, borderRadius: 10, 
+        backgroundColor: 'rgba(255,255,255,0.05)', 
+        justifyContent: 'center', alignItems: 'center'
+      }}>
+        <Text style={{ color: colors.textMuted, fontSize: 16, fontWeight: '600' }}>›</Text>
+      </View>
     </TouchableOpacity>
   );
 
   return (
-    <ScrollView contentContainerStyle={{ padding: 20, paddingBottom: 40 }}>
+    <ScrollView 
+      contentContainerStyle={{ padding: 20, paddingBottom: 40 }}
+      refreshControl={
+        <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.primary} colors={[colors.primary]} />
+      }
+    >
+      {/* Network Error Banner */}
+      {networkError && (
+        <View style={{ backgroundColor: 'rgba(255,61,113,0.1)', padding: 12, borderRadius: 12, marginBottom: 12, borderWidth: 1, borderColor: 'rgba(255,61,113,0.3)' }}>
+          <Text style={{ color: colors.error, fontSize: 13, fontWeight: '600', textAlign: 'center' }}>
+            ⚠️ Network error. Pull down to retry.
+          </Text>
+        </View>
+      )}
       {/* Header */}
       <View style={{ marginTop: 30, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' }}>
         <View style={{ flex: 1 }}>
-          <Text style={{ fontSize: 32, fontWeight: '900', color: colors.primary, letterSpacing: 1 }}>
-            ATTENDEASE
+          <Text style={{ fontSize: 30, fontWeight: '900', color: colors.primary, letterSpacing: 1.5 }}>
+            AttendEase
+          </Text>
+          <Text style={{ color: colors.textMuted, fontSize: 12, marginTop: 2 }}>
+            AI-Powered Attendance
           </Text>
           <View style={{
-            alignSelf: 'flex-start', marginTop: 6,
+            alignSelf: 'flex-start', marginTop: 8,
             backgroundColor: userRole === 'super-admin'
-              ? 'rgba(255, 0, 85, 0.15)'
+              ? 'rgba(255, 0, 85, 0.12)'
               : userRole === 'teacher'
-                ? 'rgba(0, 209, 255, 0.15)'
-                : 'rgba(0, 224, 150, 0.15)',
-            paddingHorizontal: 10, paddingVertical: 4, borderRadius: 8,
+                ? 'rgba(0, 209, 255, 0.12)'
+                : 'rgba(0, 224, 150, 0.12)',
+            paddingHorizontal: 12, paddingVertical: 5, borderRadius: 10,
           }}>
             <Text style={{
               fontSize: 11, fontWeight: '700', letterSpacing: 1,
@@ -107,31 +141,35 @@ const HomeScreen: React.FC<HomeScreenProps> = ({ onNavigate, userRole, regNumber
                   ? colors.primary
                   : colors.success,
             }}>
-              {userRole === 'super-admin' ? 'SUPER ADMIN' : userRole?.toUpperCase() || '...'}
+              {userRole === 'super-admin' ? '👑 SUPER ADMIN' : userRole === 'teacher' ? '🎓 TEACHER' : '📖 STUDENT'}
             </Text>
           </View>
         </View>
         <TouchableOpacity
           style={{
             backgroundColor: 'rgba(255,255,255,0.05)',
-            padding: 12, borderRadius: 12,
+            padding: 12, borderRadius: 14,
             borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)',
           }}
           onPress={() => onNavigate('profile')}
         >
-          <Text style={{ fontSize: 20 }}>👤</Text>
+          <Text style={{ fontSize: 22 }}>👤</Text>
         </TouchableOpacity>
       </View>
 
       {/* Welcome Card */}
-      <View style={[globalStyles.card, { marginTop: 24 }]}>
+      <View style={{
+        marginTop: 24, padding: 22, borderRadius: 22,
+        backgroundColor: 'rgba(255,255,255,0.04)',
+        borderWidth: 1, borderColor: 'rgba(255,255,255,0.06)',
+      }}>
         <Text style={{ color: colors.text, fontSize: 22, fontWeight: '800' }}>
-          {isAdmin ? 'Welcome, Admin 👋' : 'Welcome 👋'}
+          {isAdmin ? 'Good to see you! 👋' : 'Hey there! 👋'}
         </Text>
-        <Text style={{ color: colors.textMuted, marginTop: 6, fontSize: 14, lineHeight: 20 }}>
+        <Text style={{ color: colors.textMuted, marginTop: 6, fontSize: 14, lineHeight: 21 }}>
           {isAdmin
-            ? 'Manage enrollments, scan classrooms, and review registrations.'
-            : 'Track your attendance and stay updated.'}
+            ? 'Ready to manage your classroom? Scan faces, enroll students, and track attendance.'
+            : 'Check your attendance, view notifications, and stay on track.'}
         </Text>
       </View>
 
@@ -250,7 +288,7 @@ const HomeScreen: React.FC<HomeScreenProps> = ({ onNavigate, userRole, regNumber
       {/* Footer */}
       <View style={{ marginTop: 30, alignItems: 'center', opacity: 0.4 }}>
         <Text style={{ color: colors.textMuted, fontSize: 11 }}>
-          AttendEase AI v3.0
+          AttendEase AI v{appVersion}
         </Text>
       </View>
     </ScrollView>

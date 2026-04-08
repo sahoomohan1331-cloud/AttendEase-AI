@@ -1,12 +1,13 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
   View, Text, TouchableOpacity, ActivityIndicator, Alert,
-  Image as RNImage, FlatList, StyleSheet, ScrollView, Dimensions, Modal, TextInput
+  Image as RNImage, FlatList, StyleSheet, ScrollView, Dimensions, Modal, TextInput, Vibration
 } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { collection, addDoc, getDocs, query, where } from 'firebase/firestore';
+import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import axios from 'axios';
-import { db } from '../firebaseConfig';
+import { db, storage } from '../firebaseConfig';
 import { colors, globalStyles } from '../styles';
 import { ENDPOINTS } from '../config';
 
@@ -40,6 +41,10 @@ const AttendanceScreen: React.FC<AttendanceScreenProps> = ({ onBack }) => {
   const [totalFaces, setTotalFaces] = useState<number | null>(null);
   const [saved, setSaved] = useState(false);
   const [showFullImage, setShowFullImage] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [showCustomSubject, setShowCustomSubject] = useState(false);
+  const [customCode, setCustomCode] = useState('');
+  const [customName, setCustomName] = useState('');
   const [showAddModal, setShowAddModal] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const cameraRef = useRef<CameraView>(null);
@@ -52,6 +57,7 @@ const AttendanceScreen: React.FC<AttendanceScreenProps> = ({ onBack }) => {
     if (cameraRef.current && capturedImages.length < 4) {
       const photo = await cameraRef.current.takePictureAsync({ quality: 0.8, base64: true });
       if (photo) {
+        Vibration.vibrate(50); // Haptic feedback on capture
         setCapturedImages(prev => [...prev, photo.uri]);
       }
     }
@@ -113,12 +119,13 @@ const AttendanceScreen: React.FC<AttendanceScreenProps> = ({ onBack }) => {
   const fetchCohortStudents = async () => {
     if (!selectedSubject) return;
     try {
-      const snapshot = await getDocs(collection(db, 'Students'));
+      // Query the 'users' collection (which has regNumber, department, etc.)
+      const snapshot = await getDocs(collection(db, 'users'));
       const students: string[] = [];
       snapshot.forEach((docSnap: any) => {
         const data = docSnap.data();
-        if (data.department === selectedSubject.department && data.semester === selectedSubject.semester) {
-          students.push(docSnap.id);
+        if (data.role === 'student' && data.regNumber) {
+          students.push(data.regNumber);
         }
       });
       setEnrolledStudents(students.sort());
@@ -127,25 +134,52 @@ const AttendanceScreen: React.FC<AttendanceScreenProps> = ({ onBack }) => {
     }
   };
 
+  // Upload annotated image to Firebase Storage
+  const uploadAnnotatedImage = async (base64Data: string, subjectCode: string, dateStr: string): Promise<string | null> => {
+    try {
+      // Convert base64 to blob
+      const response = await fetch(base64Data);
+      const blob = await response.blob();
+      const filename = `attendance_photos/${subjectCode}/${dateStr}_${Date.now()}.jpg`;
+      const storageRef = ref(storage, filename);
+      await uploadBytes(storageRef, blob);
+      const downloadUrl = await getDownloadURL(storageRef);
+      return downloadUrl;
+    } catch (err) {
+      console.error('Photo upload failed:', err);
+      return null;
+    }
+  };
+
   // Save attendance record to Firestore & Send Notifications
   const saveAttendance = async () => {
-    if (!selectedSubject || saved) return;
+    if (!selectedSubject || saved || isSaving) return;
 
+    setIsSaving(true);
     try {
       const now = new Date();
+      const dateStr = now.toISOString().split('T')[0];
+
+      // Upload the annotated image if available
+      let photoUrl: string | null = null;
+      if (annotatedImage) {
+        photoUrl = await uploadAnnotatedImage(annotatedImage, selectedSubject.code, dateStr);
+      }
+
       const attendanceId = await addDoc(collection(db, 'attendance_records'), {
         subjectCode: selectedSubject.code,
         subjectName: selectedSubject.name,
-        date: now.toISOString().split('T')[0],
+        date: dateStr,
         time: now.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }),
         timestamp: now.toISOString(),
         totalFaces: totalFaces,
         presentStudents: presentStudents,
         presentCount: presentStudents.length,
+        ...(photoUrl ? { photoUrl } : {}),
       });
 
       // Send notifications to present students
-      const notificationPromises = presentStudents.map(regNumber => 
+      const notificationPromises = presentStudents.map(regNumber =>
         addDoc(collection(db, 'notifications'), {
           to: regNumber,
           type: 'attendance',
@@ -158,12 +192,15 @@ const AttendanceScreen: React.FC<AttendanceScreenProps> = ({ onBack }) => {
       );
       await Promise.all(notificationPromises);
 
+      Vibration.vibrate(100); // Haptic confirmation
       setSaved(true);
       setPhase('results');
       Alert.alert('✅ Confirmed', `Attendance saved and notifications sent to ${presentStudents.length} students.`);
     } catch (err) {
       console.error(err);
       Alert.alert('Error', 'Could not save attendance record.');
+    } finally {
+      setIsSaving(false);
     }
   };
 
@@ -246,7 +283,7 @@ const AttendanceScreen: React.FC<AttendanceScreenProps> = ({ onBack }) => {
                 borderColor: selectedSubject?.code === subject.code ? colors.primary : 'rgba(255,255,255,0.05)',
                 borderWidth: selectedSubject?.code === subject.code ? 2 : 1,
               }]}
-              onPress={() => setSelectedSubject(subject)}
+              onPress={() => { setSelectedSubject(subject); setShowCustomSubject(false); }}
             >
               <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
                 <View>
@@ -257,7 +294,7 @@ const AttendanceScreen: React.FC<AttendanceScreenProps> = ({ onBack }) => {
                     {subject.name}
                   </Text>
                 </View>
-                {selectedSubject?.code === subject.code && (
+                {selectedSubject?.code === subject.code && !showCustomSubject && (
                   <View style={{
                     width: 24, height: 24, borderRadius: 12,
                     backgroundColor: colors.primary,
@@ -269,6 +306,50 @@ const AttendanceScreen: React.FC<AttendanceScreenProps> = ({ onBack }) => {
               </View>
             </TouchableOpacity>
           ))}
+
+          {/* Custom Subject Option */}
+          <TouchableOpacity
+            style={[globalStyles.card, {
+              marginBottom: 10, padding: 16,
+              borderColor: showCustomSubject ? '#FFB800' : 'rgba(255,255,255,0.05)',
+              borderWidth: showCustomSubject ? 2 : 1,
+              borderStyle: 'dashed',
+            }]}
+            onPress={() => setShowCustomSubject(!showCustomSubject)}
+          >
+            <Text style={{ color: '#FFB800', fontSize: 16, fontWeight: '700' }}>+ Custom Subject</Text>
+            <Text style={{ color: colors.textMuted, fontSize: 13, marginTop: 2 }}>Add a subject not in the list</Text>
+          </TouchableOpacity>
+
+          {showCustomSubject && (
+            <View style={[globalStyles.card, { marginBottom: 10, padding: 16 }]}>
+              <TextInput
+                style={[globalStyles.input, { marginBottom: 10 }]}
+                placeholder="Subject Code (e.g. CSE401)"
+                placeholderTextColor={colors.textMuted}
+                value={customCode}
+                onChangeText={setCustomCode}
+              />
+              <TextInput
+                style={[globalStyles.input, { marginBottom: 10 }]}
+                placeholder="Subject Name (e.g. Machine Learning)"
+                placeholderTextColor={colors.textMuted}
+                value={customName}
+                onChangeText={setCustomName}
+              />
+              <TouchableOpacity
+                style={[globalStyles.button, { height: 44, opacity: customCode && customName ? 1 : 0.4 }]}
+                onPress={() => {
+                  if (customCode && customName) {
+                    setSelectedSubject({ code: customCode.trim(), name: customName.trim(), department: 'Custom', semester: 0 });
+                  }
+                }}
+                disabled={!customCode || !customName}
+              >
+                <Text style={globalStyles.buttonText}>USE THIS SUBJECT</Text>
+              </TouchableOpacity>
+            </View>
+          )}
 
           <TouchableOpacity
             style={[globalStyles.button, {
@@ -412,8 +493,13 @@ const AttendanceScreen: React.FC<AttendanceScreenProps> = ({ onBack }) => {
           <TouchableOpacity 
             style={[globalStyles.button, { marginTop: 20, backgroundColor: colors.success }]}
             onPress={saveAttendance}
+            disabled={isSaving}
           >
-            <Text style={[globalStyles.buttonText, { color: '#000' }]}>✅ CONFIRM & SAVE</Text>
+            {isSaving ? (
+              <ActivityIndicator color="#000" />
+            ) : (
+              <Text style={[globalStyles.buttonText, { color: '#000' }]}>✅ CONFIRM & SAVE</Text>
+            )}
           </TouchableOpacity>
         </ScrollView>
       )}
