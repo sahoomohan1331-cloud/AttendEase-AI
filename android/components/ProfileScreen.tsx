@@ -16,9 +16,10 @@ interface ProfileScreenProps {
     faceRegistered: boolean;
     createdAt: string;
   };
+  appVersion: string;
 }
 
-const ProfileScreen: React.FC<ProfileScreenProps> = ({ onBack, userData }) => {
+const ProfileScreen: React.FC<ProfileScreenProps> = ({ onBack, userData, appVersion }) => {
   const handleLogout = async () => {
     Alert.alert('Logout', 'Are you sure you want to log out?', [
       { text: 'Cancel', style: 'cancel' },
@@ -118,7 +119,7 @@ const ProfileScreen: React.FC<ProfileScreenProps> = ({ onBack, userData }) => {
           ABOUT APP
         </Text>
         <Text style={{ color: colors.text, fontSize: 14 }}>AttendEase AI</Text>
-        <Text style={{ color: colors.textMuted, fontSize: 12, marginTop: 4 }}>Version 2.0 — Sprint 2</Text>
+        <Text style={{ color: colors.textMuted, fontSize: 12, marginTop: 4 }}>Version {appVersion}</Text>
         <Text style={{ color: colors.textMuted, fontSize: 12, marginTop: 2 }}>AI-Powered Attendance System</Text>
       </View>
 

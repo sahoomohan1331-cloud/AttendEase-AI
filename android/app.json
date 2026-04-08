@@ -2,7 +2,7 @@
   "expo": {
     "name": "AttendEase AI",
     "slug": "attendease-ai",
-    "version": "3.0.0",
+    "version": "3.1.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
@@ -18,7 +18,7 @@
     },
     "android": {
       "package": "com.attendease.ai",
-      "versionCode": 3,
+      "versionCode": 4,
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#0D0E15"
@@ -35,9 +35,17 @@
     "web": {
       "favicon": "./assets/favicon.png"
     },
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/60b67aa8-9656-4d73-b83f-ea7d1a1dfa6b",
+      "checkAutomatically": "ON_APP_START",
+      "fallbackToCacheTimeout": 0
+    },
     "extra": {
       "eas": {
-        "projectId": "attendease-ai"
+        "projectId": "60b67aa8-9656-4d73-b83f-ea7d1a1dfa6b"
       }
     }
   }

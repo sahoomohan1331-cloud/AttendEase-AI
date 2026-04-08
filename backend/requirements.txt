@@ -1,12 +1,13 @@
-fastapi==0.115.0
-uvicorn[standard]==0.30.0
-firebase-admin==6.6.0
-facenet-pytorch==2.6.0
-python-multipart==0.0.20
-numpy==2.1.0
-pillow==11.0.0
-python-dotenv==1.0.1
-scipy==1.14.0
+fastapi
+uvicorn[standard]
+firebase-admin
+facenet-pytorch
+python-multipart
+numpy<2.0.0
+pillow<10.3.0
+python-dotenv
+scipy
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch==2.4.0+cpu
 torchvision==0.19.0+cpu
+

@@ -5,7 +5,7 @@ import { doc, getDoc } from 'firebase/firestore';
 import { auth, db } from '../firebaseConfig';
 import { colors, globalStyles } from '../styles';
 
-const PendingScreen = () => {
+const PendingScreen = ({ onApproved }: { onApproved?: () => void }) => {
   const [checking, setChecking] = useState(false);
 
   // Auto-check every 15 seconds
@@ -20,13 +20,18 @@ const PendingScreen = () => {
     try {
       const userDoc = await getDoc(doc(db, 'users', auth.currentUser.uid));
       if (userDoc.exists() && userDoc.data().approved) {
-        // Force reload by signing out and back in
         Alert.alert('🎉 Approved!', 'Your account has been approved! The app will refresh now.', [
-          { text: 'OK', onPress: () => {
-            // Trigger a re-render by reloading auth state
-            auth.currentUser?.reload();
-            // Force state refresh
-            window?.location?.reload?.();
+          { text: 'OK', onPress: async () => {
+            // Force Firebase auth state to re-trigger by reloading the user
+            await auth.currentUser?.reload();
+            // Sign out and back in to force the onAuthStateChanged listener to re-fire
+            const email = auth.currentUser?.email;
+            if (onApproved) {
+              onApproved();
+            } else {
+              // Fallback: sign out so user can log back in fresh
+              await signOut(auth);
+            }
           }}
         ]);
       }

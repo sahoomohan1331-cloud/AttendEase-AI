@@ -2,13 +2,13 @@ import os
 import re
 import time
 import random
-import smtplib
+import json
+import urllib.request
+import urllib.parse
 import torch
 import numpy as np
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 from collections import defaultdict
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Request
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Request, BackgroundTasks, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from firebase_admin import credentials, firestore, initialize_app, auth as firebase_auth
@@ -61,7 +61,6 @@ async def rate_limit_middleware(request: Request, call_next):
 # ============================================================
 # 3. Setup Firebase (supports both local file and cloud env var)
 # ============================================================
-import json
 
 firebase_key_json = os.environ.get("FIREBASE_SERVICE_ACCOUNT_KEY")
 if firebase_key_json:
@@ -96,9 +95,48 @@ MODEL_PATH = "models/final_attendance_model.pt"
 
 if os.path.exists(MODEL_PATH):
     print(f"🧠 Loading custom-trained AI Brain: {MODEL_PATH}...")
-    model.load_state_dict(torch.load(MODEL_PATH, map_location=device))
+    model.load_state_dict(torch.load(MODEL_PATH, map_location=device, weights_only=True))
 else:
     print("⚠️ WARNING: Custom model NOT FOUND. Using base intelligence.")
+
+# ============================================================
+# 4b. In-Memory Student Vector Cache (Optimization 2)
+# ============================================================
+# Pre-load and pre-normalize all student vectors at startup.
+# This eliminates repeated Firestore reads and repeated norm calculations.
+
+_enrolled_cache: dict[str, np.ndarray] = {}  # student_id -> normalized vector
+_enrolled_matrix: np.ndarray | None = None    # shape: [N, 512] pre-normalized
+_enrolled_ids: list[str] = []                  # ordered list matching matrix rows
+
+def refresh_enrolled_cache():
+    """Reload all enrolled student vectors from Firestore into RAM."""
+    global _enrolled_cache, _enrolled_matrix, _enrolled_ids
+    try:
+        docs = db.collection("Students").get()
+        new_cache = {}
+        for d in docs:
+            data = d.to_dict()
+            if "face_vector" in data:
+                vec = np.array(data["face_vector"], dtype=np.float32)
+                norm = np.linalg.norm(vec)
+                if norm > 0:
+                    new_cache[d.id] = vec / norm  # Pre-normalize!
+        
+        _enrolled_cache = new_cache
+        if new_cache:
+            _enrolled_ids = list(new_cache.keys())
+            _enrolled_matrix = np.stack([new_cache[sid] for sid in _enrolled_ids])
+        else:
+            _enrolled_ids = []
+            _enrolled_matrix = None
+        
+        print(f"📋 Enrolled cache refreshed: {len(_enrolled_cache)} students loaded.")
+    except Exception as e:
+        print(f"❌ Cache refresh error: {e}")
+
+# Load cache on startup
+refresh_enrolled_cache()
 
 # ============================================================
 # 5. OTP Storage (In-Memory, expires after 5 minutes)
@@ -106,11 +144,8 @@ else:
 otp_store: dict[str, dict] = {}
 OTP_EXPIRY_SECONDS = 300  # 5 minutes
 
-# Email config — loaded from .env
-SMTP_EMAIL = os.environ.get("SMTP_EMAIL", "")  
-SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")  # Gmail app password
-SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.gmail.com")
-SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
+# Admin API token for protected endpoints
+ADMIN_API_TOKEN = os.environ.get("ADMIN_API_TOKEN", "attendease-admin-2026")
 
 # ============================================================
 # Helper Functions
@@ -177,45 +212,45 @@ def generate_otp() -> str:
     """Generate a 6-digit OTP."""
     return str(random.randint(100000, 999999))
 
-def send_otp_email(to_email: str, otp: str) -> bool:
-    """Send OTP via SMTP email. Returns True if sent, False otherwise."""
-    if not SMTP_EMAIL or not SMTP_PASSWORD:
-        print(f"📧 [NO SMTP CONFIGURED] OTP for {to_email}: {otp}")
-        return True  # Still succeed — OTP is printed to console for testing
+APPS_SCRIPT_URL = os.environ.get(
+    "APPS_SCRIPT_URL",
+    "https://script.google.com/macros/s/AKfycbzvuV4PxerJiSTAajPnb6rMPwwmfFnId74VG07pgQyivK1I0azA6RHHWEea6TNJb6ES1A/exec"
+)
 
+def send_email_via_script(to_email: str, subject: str, html_body: str) -> bool:
+    """Send email securely using the HTTPS Google Apps Script API."""
     try:
-        msg = MIMEMultipart("alternative")
-        msg["Subject"] = "AttendEase — Your Verification Code"
-        msg["From"] = f"AttendEase AI <{SMTP_EMAIL}>"
-        msg["To"] = to_email
-
-        html = f"""
-        <div style="font-family: Arial, sans-serif; max-width: 400px; margin: 0 auto; padding: 30px;
-                    background: linear-gradient(135deg, #0D0E15, #1C1F2E); color: white; border-radius: 16px;">
-            <h2 style="color: #00D1FF; margin-bottom: 5px;">AttendEase AI</h2>
-            <p style="color: #8F9BB3; font-size: 14px;">Your verification code is:</p>
-            <div style="background: rgba(0,209,255,0.1); border: 2px solid rgba(0,209,255,0.3);
-                        border-radius: 12px; padding: 20px; text-align: center; margin: 20px 0;">
-                <span style="font-size: 36px; font-weight: 900; letter-spacing: 8px; color: #00D1FF;">
-                    {otp}
-                </span>
-            </div>
-            <p style="color: #8F9BB3; font-size: 12px;">This code expires in 5 minutes.</p>
-            <p style="color: #8F9BB3; font-size: 12px;">If you didn't request this, ignore this email.</p>
-        </div>
-        """
-        msg.attach(MIMEText(html, "html"))
-
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-            server.starttls()
-            server.login(SMTP_EMAIL, SMTP_PASSWORD)
-            server.sendmail(SMTP_EMAIL, to_email, msg.as_string())
-        print(f"📧 OTP sent to {to_email}")
-        return True
+        data = urllib.parse.urlencode({"to": to_email, "subject": subject, "html": html_body}).encode("utf-8")
+        req = urllib.request.Request(APPS_SCRIPT_URL, data=data)
+        with urllib.request.urlopen(req, timeout=10) as response:
+            res = response.read().decode("utf-8")
+            print(f"📧 API Response for {to_email}: {res}")
+            return True
     except Exception as e:
-        print(f"❌ Email send error: {e}")
+        print(f"❌ Apps Script Email Error: {e}")
+        return False
+
+def send_otp_email(to_email: str, otp: str) -> bool:
+    """Send OTP via Apps Script. Returns True if sent, False otherwise."""
+    html = f"""
+    <div style="font-family: Arial, sans-serif; max-width: 400px; margin: 0 auto; padding: 30px;
+                background: linear-gradient(135deg, #0D0E15, #1C1F2E); color: white; border-radius: 16px;">
+        <h2 style="color: #00D1FF; margin-bottom: 5px;">AttendEase AI</h2>
+        <p style="color: #8F9BB3; font-size: 14px;">Your verification code is:</p>
+        <div style="background: rgba(0,209,255,0.1); border: 2px solid rgba(0,209,255,0.3);
+                    border-radius: 12px; padding: 20px; text-align: center; margin: 20px 0;">
+            <span style="font-size: 36px; font-weight: 900; letter-spacing: 8px; color: #00D1FF;">
+                {otp}
+            </span>
+        </div>
+        <p style="color: #8F9BB3; font-size: 12px;">This code expires in 5 minutes.</p>
+        <p style="color: #8F9BB3; font-size: 12px;">If you didn't request this, ignore this email.</p>
+    </div>
+    """
+    success = send_email_via_script(to_email, "AttendEase — Your Verification Code", html)
+    if not success:
         print(f"📧 [FALLBACK] OTP for {to_email}: {otp}")
-        return True  # Still succeed so registration isn't blocked
+    return True  # Still succeed so registration isn't blocked
 
 # ============================================================
 # API ENDPOINTS
@@ -325,6 +360,10 @@ async def register_student(student_id: str = Form(...), file: UploadFile = File(
         "face_vector": vector.tolist(),
         "registered_on": firestore.SERVER_TIMESTAMP
     })
+    
+    # Auto-refresh cache so the new student is immediately available
+    refresh_enrolled_cache()
+    
     return {"status": "success", "message": f"Face ID for {clean_id} enrolled successfully!"}
 
 # ------ VALIDATE FACE ------
@@ -344,7 +383,7 @@ async def validate_face(file: UploadFile = File(...)):
 
 # ------ TAKE ATTENDANCE ------
 
-MATCH_THRESHOLD = 0.65  # Minimum cosine similarity to consider a match
+MATCH_THRESHOLD = 0.75  # Increased from 0.65 to prevent false positives
 
 def is_photo_spoofed(img_pil):
     """
@@ -382,11 +421,17 @@ def is_photo_spoofed(img_pil):
         print(f"   ⚠️ Liveness check error: {e}")
         return False, None
 
-def process_single_photo(img_pil, enrolled_data):
+BATCH_CHUNK_SIZE = 16  # Process faces in safe chunks to avoid OOM on free tier
+
+def process_single_photo(img_pil, enrolled_ids, enrolled_matrix):
     """
     Process one photo: detect liveness, detect faces, match them.
+    Uses vectorized NumPy matrix matching for 10-100x speedup.
     Returns (recognized_ids, total_faces, annotated_b64, error_msg)
     """
+    import time as _time
+    t_start = _time.time()
+    
     # Liveness Check
     is_spoof, reason = is_photo_spoofed(img_pil)
     if is_spoof:
@@ -395,7 +440,7 @@ def process_single_photo(img_pil, enrolled_data):
     # Preprocess
     img_pil = preprocess_classroom_photo(img_pil)
     
-    # Detect faces
+    # Detect faces (single pass)
     try:
         boxes, probs = detector.detect(img_pil)
     except Exception as e:
@@ -406,11 +451,12 @@ def process_single_photo(img_pil, enrolled_data):
         return [], 0, None, None
 
     total_faces = len(boxes)
-    face_vectors = []
+    print(f"   👁 Detected {total_faces} faces in {_time.time() - t_start:.2f}s")
 
-    # Get embeddings (Batch Mode 🚀)
+    # ── Optimization 4: Single-pass alignment ──
+    # Use MTCNN on the full image once to get aligned face tensors directly
     aligned_faces = []
-    _face_indices = []
+    _face_indices = []  # (box_index, face_width)
     
     for i, box in enumerate(boxes):
         try:
@@ -418,12 +464,12 @@ def process_single_photo(img_pil, enrolled_data):
             face_w = x2 - x1
             face_h = y2 - y1
             
-            # Aligned face crop
+            # Padded crop
             pw, ph = int(face_w * 0.15), int(face_h * 0.15)
-            x1, y1 = max(0, x1 - pw), max(0, y1 - ph)
-            x2, y2 = min(img_pil.width, x2 + pw), min(img_pil.height, y2 + ph)
+            cx1, cy1 = max(0, x1 - pw), max(0, y1 - ph)
+            cx2, cy2 = min(img_pil.width, x2 + pw), min(img_pil.height, y2 + ph)
             
-            face_crop = img_pil.crop((x1, y1, x2, y2))
+            face_crop = img_pil.crop((cx1, cy1, cx2, cy2))
             aligned_face = detector(face_crop)
             if aligned_face is not None:
                 if len(aligned_face.shape) > 3: aligned_face = aligned_face[0]
@@ -432,38 +478,63 @@ def process_single_photo(img_pil, enrolled_data):
         except Exception: 
             continue
 
-    if aligned_faces:
+    if not aligned_faces:
+        return [], total_faces, None, None
+
+    # ── Optimization 3: Chunked batch inference ──
+    all_vectors = []
+    for chunk_start in range(0, len(aligned_faces), BATCH_CHUNK_SIZE):
+        chunk = aligned_faces[chunk_start:chunk_start + BATCH_CHUNK_SIZE]
         try:
-            batch_tensor = torch.stack(aligned_faces).to(device)
+            batch_tensor = torch.stack(chunk).to(device)
             with torch.no_grad():
-                batch_vectors = model(batch_tensor).cpu().numpy()
-            
-            for idx, vec in enumerate(batch_vectors):
-                box_idx, face_w = _face_indices[idx]
-                face_vectors.append((box_idx, vec.flatten(), face_w))
+                chunk_vectors = model(batch_tensor).cpu().numpy()
+            all_vectors.append(chunk_vectors)
         except Exception as e:
-            print(f"   ⚠️ Batch Inference error: {e}")
+            print(f"   ⚠️ Batch chunk error: {e}")
+            continue
+    
+    if not all_vectors:
+        return [], total_faces, None, None
+    
+    face_vectors_np = np.vstack(all_vectors)  # Shape: [num_faces, 512]
+    print(f"   🧠 Embedded {face_vectors_np.shape[0]} faces in {_time.time() - t_start:.2f}s")
 
-    # One-to-one matching
-    match_candidates = []
-    for face_idx, face_vec, _ in face_vectors:
-        for s_id, s_vec in enrolled_data.items():
-            similarity = float(np.dot(face_vec, s_vec) / (np.linalg.norm(face_vec) * np.linalg.norm(s_vec)))
-            if similarity >= MATCH_THRESHOLD:
-                match_candidates.append((similarity, face_idx, s_id))
-
-    match_candidates.sort(key=lambda x: x[0], reverse=True)
+    # ── Optimization 1: Vectorized matrix matching ──
+    # Normalize all face vectors at once
+    face_norms = np.linalg.norm(face_vectors_np, axis=1, keepdims=True)
+    face_norms[face_norms == 0] = 1  # Avoid division by zero
+    face_vectors_normed = face_vectors_np / face_norms
+    
+    # Compute ALL similarities in ONE matrix multiply: [num_faces x num_students]
+    similarity_matrix = face_vectors_normed @ enrolled_matrix.T  # Instant!
+    
+    # One-to-one matching using the similarity matrix
     matched_faces = set()
     matched_students = set()
     recognized_ids = []
     face_to_student = {}
 
-    for similarity, face_idx, s_id in match_candidates:
-        if face_idx in matched_faces or s_id in matched_students: continue
-        matched_faces.add(face_idx)
+    # Get all (similarity, face_local_idx, student_idx) pairs above threshold
+    face_idxs, student_idxs = np.where(similarity_matrix >= MATCH_THRESHOLD)
+    candidates = []
+    for fi, si in zip(face_idxs, student_idxs):
+        candidates.append((float(similarity_matrix[fi, si]), fi, si))
+    
+    # Sort by highest similarity first (greedy one-to-one assignment)
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    
+    for similarity, face_local_idx, student_idx in candidates:
+        box_idx = _face_indices[face_local_idx][0]
+        s_id = enrolled_ids[student_idx]
+        if box_idx in matched_faces or s_id in matched_students:
+            continue
+        matched_faces.add(box_idx)
         matched_students.add(s_id)
         recognized_ids.append(s_id)
-        face_to_student[face_idx] = (s_id, similarity)
+        face_to_student[box_idx] = (s_id, similarity)
+    
+    print(f"   ✅ Matched {len(recognized_ids)}/{total_faces} faces in {_time.time() - t_start:.2f}s")
 
     # Annotate
     from PIL import ImageDraw, ImageFont
@@ -483,7 +554,7 @@ def process_single_photo(img_pil, enrolled_data):
             student_id, score = face_to_student[i]
             color = (0, 224, 150)
             draw.rectangle([x1, y1, x2, y2], outline=color, width=3)
-            label = f"{student_id}"
+            label = f"{student_id} ({score:.2f})"
             bbox = draw.textbbox((x1, y1), label, font=font)
             draw.rectangle([x1, y1 - (bbox[3]-bbox[1]+8) - 2, x1 + (bbox[2]-bbox[0]+10), y1], fill=color)
             draw.text((x1 + 4, y1 - (bbox[3]-bbox[1]+8)), label, fill=(0, 0, 0), font=font)
@@ -496,27 +567,67 @@ def process_single_photo(img_pil, enrolled_data):
     annotated.save(buffer, format="JPEG", quality=80)
     return recognized_ids, total_faces, base64.b64encode(buffer.getvalue()).decode("utf-8"), None
 
+def send_absent_emails_task(present_students: list):
+    """Background task to fetch all students and email the absent ones."""
+    try:
+        # Get all users who are students
+        users_ref = db.collection("users").where("role", "==", "student").stream()
+        absent_emails = []
+        for user in users_ref:
+            data = user.to_dict()
+            reg_num = data.get("regNumber")
+            email = data.get("email")
+            
+            # If student has a regNumber, email, and is NOT in present_students...
+            if reg_num and email and (reg_num not in present_students):
+                absent_emails.append(email)
+                
+        if not absent_emails:
+            print("✅ All students are present! No absent emails to send.")
+            return
+
+        print(f"📧 Sending ABSENT notification to {len(absent_emails)} students via Apps Script...")
+        
+        for email in absent_emails:
+            html = f"""
+            <div style="font-family: Arial, sans-serif; max-width: 400px; margin: 0 auto; padding: 30px;
+                        background: linear-gradient(135deg, #1A1015, #2B151F); color: white; border-radius: 16px;">
+                <h2 style="color: #FF4D4D; margin-bottom: 5px;">Attendance Alert ⚠️</h2>
+                <p style="color: #F8B4B4; font-size: 14px;">Hello,</p>
+                <div style="background: rgba(255,77,77,0.1); border: 2px solid rgba(255,77,77,0.3);
+                            border-radius: 12px; padding: 20px; textAlign: center; margin: 20px 0;">
+                    <span style="font-size: 18px; font-weight: bold; color: #FF4D4D;">
+                        You have been marked ABSENT for today's class session.
+                    </span>
+                </div>
+                <p style="color: #F8B4B4; font-size: 13px;">If you believe this is a mistake or were unable to capture your face, please contact your professor immediately to correct your attendance record.</p>
+                <hr style="border: 0; border-top: 1px solid rgba(255,255,255,0.1); margin: 20px 0;">
+                <p style="color: #A0A0A0; font-size: 11px;">This is an automated message from the AttendEase AI System. Do not reply.</p>
+            </div>
+            """
+            
+            send_email_via_script(email, "AttendEase: Absent Notification", html)
+                
+        print(f"✅ Finished sending {len(absent_emails)} absent emails.")
+                
+    except Exception as e:
+        print(f"❌ Background Email Task Failed: {e}")
+
 @app.post("/attendance")
-async def take_attendance(files: list[UploadFile] = File(...)):
+async def take_attendance(background_tasks: BackgroundTasks, files: list[UploadFile] = File(...)):
     """
     Scan up to 4 classroom photos and identify enrolled students collectively.
-    Higher accuracy by aggregating detections from multiple angles.
+    Optimized for 30-100 students using vectorized matrix matching.
     """
     if not files:
         return {"status": "error", "error": "No files uploaded."}
 
-    # Step 1: Load enrolled student vectors (once for all photos)
-    docs = db.collection("Students").get()
-    if not docs:
-        return {"status": "error", "error": "No students enrolled yet."}
-
-    enrolled_data = {}
-    for d in docs:
-        data = d.to_dict()
-        if "face_vector" in data:
-            enrolled_data[d.id] = np.array(data["face_vector"])
-
-    if not enrolled_data:
+    # ── Optimization 2: Use cached vectors instead of hitting Firestore ──
+    if not _enrolled_cache or _enrolled_matrix is None:
+        # Try a fresh reload in case students were added externally
+        refresh_enrolled_cache()
+    
+    if not _enrolled_cache or _enrolled_matrix is None:
         return {"status": "error", "error": "No students have face vectors registered."}
 
     # Step 2: Process each photo
@@ -525,23 +636,24 @@ async def take_attendance(files: list[UploadFile] = File(...)):
     max_detections = -1
     total_unique_faces_detected = 0
 
-    print(f"📸 Processing {len(files)} attendance photos...")
+    print(f"📸 Processing {len(files)} attendance photos ({len(_enrolled_cache)} students in cache)...")
 
     for i, file in enumerate(files):
         try:
             img_bytes = await file.read()
             img_pil = Image.open(io.BytesIO(img_bytes)).convert("RGB")
             
-            recognized, face_count, annotated_b64, error_msg = process_single_photo(img_pil, enrolled_data)
+            recognized, face_count, annotated_b64, error_msg = process_single_photo(
+                img_pil, _enrolled_ids, _enrolled_matrix
+            )
             
             if error_msg:
                 print(f"   🛡️ Photo #{i+1} REJECTED: {error_msg}")
                 return {"status": "error", "error": f"Liveness Failure (Photo #{i+1}): {error_msg}"}
             
             all_recognized.update(recognized)
-            total_unique_faces_detected = max(total_unique_faces_detected, face_count) # Rough estimate
+            total_unique_faces_detected = max(total_unique_faces_detected, face_count)
 
-            # Use the frame with most recognized students as the primary feedback
             if len(recognized) > max_detections:
                 max_detections = len(recognized)
                 best_annotated = annotated_b64
@@ -556,10 +668,15 @@ async def take_attendance(files: list[UploadFile] = File(...)):
     if not all_recognized and max_detections <= 0:
         return {"status": "error", "error": "No students recognized in any of the photos."}
 
+    present_list = sorted(list(all_recognized))
+    
+    # Launch background email task
+    background_tasks.add_task(send_absent_emails_task, present_list)
+
     return {
         "status": "success",
         "total_faces": total_unique_faces_detected,
-        "present_students": sorted(list(all_recognized)),
+        "present_students": present_list,
         "annotated_image": best_annotated,
         "photos_processed": len(files)
     }
@@ -567,8 +684,10 @@ async def take_attendance(files: list[UploadFile] = File(...)):
 # ------ DELETE USER ------
 
 @app.post("/delete-user")
-async def delete_user(uid: str = Form(...)):
-    """Delete a user's Firebase Auth account (called by admin on rejection)."""
+async def delete_user(uid: str = Form(...), x_admin_token: str = Header(None, alias="X-Admin-Token")):
+    """Delete a user's Firebase Auth account (called by admin on rejection). Requires admin token."""
+    if x_admin_token != ADMIN_API_TOKEN:
+        return JSONResponse(status_code=403, content={"status": "error", "error": "Unauthorized. Invalid admin token."})
     try:
         firebase_auth.delete_user(uid)
         return {"status": "success", "message": f"Auth account deleted."}

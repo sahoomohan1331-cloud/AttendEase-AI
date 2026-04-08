@@ -1,6 +1,6 @@
 // API Configuration
 // Replace with your computer's IP address (run 'ipconfig' in PowerShell)
-export const API_BASE_URL = 'http://10.122.252.1:8000';
+export const API_BASE_URL = 'https://1331mohan-attendease-backend.hf.space';
 
 export const ENDPOINTS = {
   HEALTH_CHECK: `${API_BASE_URL}/`,

@@ -1,6 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
-  View, Text, TouchableOpacity, FlatList, ActivityIndicator, Alert, ScrollView
+  View, Text, TouchableOpacity, FlatList, ActivityIndicator, Alert, ScrollView, RefreshControl
 } from 'react-native';
 import { collection, getDocs } from 'firebase/firestore';
 import { db } from '../firebaseConfig';
@@ -24,6 +24,7 @@ const AttendanceHistory: React.FC<AttendanceHistoryProps> = ({ onBack, userRegNu
   const [loading, setLoading] = useState(true);
   const [totalClasses, setTotalClasses] = useState(0);
   const [presentCount, setPresentCount] = useState(0);
+  const [networkError, setNetworkError] = useState(false);
 
   useEffect(() => {
     fetchHistory();
@@ -62,13 +63,19 @@ const AttendanceHistory: React.FC<AttendanceHistoryProps> = ({ onBack, userRegNu
       setRecords(allRecords);
       setTotalClasses(total);
       setPresentCount(present);
+      setNetworkError(false);
     } catch (error) {
       console.error(error);
+      setNetworkError(true);
       Alert.alert('Error', 'Failed to load attendance history.');
     } finally {
       setLoading(false);
     }
   };
+
+  const onRefresh = useCallback(async () => {
+    await fetchHistory();
+  }, []);
 
   const percentage = totalClasses > 0 ? Math.round((presentCount / totalClasses) * 100) : 0;
 
@@ -92,6 +99,15 @@ const AttendanceHistory: React.FC<AttendanceHistoryProps> = ({ onBack, userRegNu
           Reg. No: {userRegNumber}
         </Text>
       </View>
+
+      {/* Network Error Banner */}
+      {networkError && (
+        <View style={{ marginHorizontal: 20, backgroundColor: 'rgba(255,61,113,0.1)', padding: 12, borderRadius: 12, marginBottom: 16, borderWidth: 1, borderColor: 'rgba(255,61,113,0.3)' }}>
+          <Text style={{ color: colors.error, fontSize: 13, fontWeight: '600', textAlign: 'center' }}>
+            ⚠️ Connection error. Swipe down to retry.
+          </Text>
+        </View>
+      )}
 
       {loading ? (
         <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
@@ -159,6 +175,7 @@ const AttendanceHistory: React.FC<AttendanceHistoryProps> = ({ onBack, userRegNu
               data={records}
               keyExtractor={(item) => item.id}
               contentContainerStyle={{ paddingHorizontal: 20, paddingBottom: 20 }}
+              refreshControl={<RefreshControl refreshing={loading} onRefresh={onRefresh} tintColor={colors.primary} colors={[colors.primary]} />}
               renderItem={({ item }) => (
                 <View style={[globalStyles.card, {
                   marginBottom: 8, padding: 14,
@@ -190,14 +207,6 @@ const AttendanceHistory: React.FC<AttendanceHistoryProps> = ({ onBack, userRegNu
               )}
             />
           )}
-
-          {/* Refresh */}
-          <TouchableOpacity
-            style={[globalStyles.button, { marginHorizontal: 20, marginBottom: 20 }]}
-            onPress={fetchHistory}
-          >
-            <Text style={globalStyles.buttonText}>↻ REFRESH</Text>
-          </TouchableOpacity>
         </>
       )}
     </View>

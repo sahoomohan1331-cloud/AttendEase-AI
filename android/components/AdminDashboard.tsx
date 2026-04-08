@@ -1,6 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
-  View, Text, TouchableOpacity, FlatList, ActivityIndicator, Alert, ScrollView
+  View, Text, TouchableOpacity, FlatList, ActivityIndicator, Alert, ScrollView, RefreshControl
 } from 'react-native';
 import {
   collection, getDocs, doc, updateDoc, deleteDoc, addDoc
@@ -37,6 +37,8 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack }) => {
 
   // Analytics
   const [totalAttendanceSessions, setTotalAttendanceSessions] = useState(0);
+  const [refreshing, setRefreshing] = useState(false);
+  const [networkError, setNetworkError] = useState(false);
 
   useEffect(() => {
     fetchAllUsers();
@@ -64,8 +66,10 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack }) => {
         });
       });
       setAllUsers(users);
+      setNetworkError(false);
     } catch (error) {
       console.error(error);
+      setNetworkError(true);
       Alert.alert('Error', 'Failed to fetch users.');
     } finally {
       setLoading(false);
@@ -80,6 +84,12 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack }) => {
       console.error(err);
     }
   };
+
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    await Promise.all([fetchAllUsers(), fetchAnalytics()]);
+    setRefreshing(false);
+  }, []);
 
   const pendingUsers = allUsers.filter((u) => !u.approved && u.role !== 'super-admin');
   const approvedUsers = allUsers.filter((u) => u.approved || u.role === 'super-admin');
@@ -147,7 +157,10 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack }) => {
                 const formData = new FormData();
                 formData.append('uid', userId);
                 await axios.post(ENDPOINTS.DELETE_USER, formData, {
-                  headers: { 'Content-Type': 'multipart/form-data' },
+                  headers: { 
+                    'Content-Type': 'multipart/form-data',
+                    'X-Admin-Token': 'attendease-admin-2026',
+                  },
                   timeout: 10000,
                 });
               } catch (backendErr) {
@@ -334,6 +347,15 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack }) => {
         </Text>
       </View>
 
+      {/* Network Error Banner */}
+      {networkError && (
+        <View style={{ marginHorizontal: 20, backgroundColor: 'rgba(255,61,113,0.1)', padding: 12, borderRadius: 12, marginBottom: 12, borderWidth: 1, borderColor: 'rgba(255,61,113,0.3)' }}>
+          <Text style={{ color: colors.error, fontSize: 13, fontWeight: '600', textAlign: 'center' }}>
+            ⚠️ Connection error. Swipe down to retry.
+          </Text>
+        </View>
+      )}
+
       {/* Tab Bar */}
       <View style={{
         flexDirection: 'row', marginHorizontal: 20, marginBottom: 16,
@@ -385,6 +407,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack }) => {
                   keyExtractor={(item) => item.id}
                   renderItem={({ item }) => renderUserCard(item, true)}
                   contentContainerStyle={{ paddingHorizontal: 20, paddingBottom: 20 }}
+                  refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.primary} colors={[colors.primary]} />}
                 />
               )}
             </>
@@ -397,6 +420,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({ onBack }) => {
               keyExtractor={(item) => item.id}
               renderItem={({ item }) => renderUserCard(item, false)}
               contentContainerStyle={{ paddingHorizontal: 20, paddingBottom: 20 }}
+              refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.primary} colors={[colors.primary]} />}
               ListEmptyComponent={() => (
                 <View style={{ alignItems: 'center', padding: 40 }}>
                   <Text style={{ color: colors.textMuted }}>No approved users yet.</Text>
